@@ -1,0 +1,4 @@
+python-magic
+requests
+pytumblr
+nudepy
