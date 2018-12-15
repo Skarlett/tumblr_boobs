@@ -1,6 +1,19 @@
 # Tumblr Scraper Kit
 Kit is a basic server & client relationship based on SSH (rsync)
 
+Features:
+  + Rolling API db
+  + Multithreaded
+  + Crawler
+  + Fine tuned options
+  + retrieve and kill backups
+
+To use the scraper, you'll need API keys (supports rolling API keys for 100s of requests)
+```python crawler --db-add <4 part key>```
+
+**NOTE** its still really janky, I highly recommend using `-il`, use atleast 6+ keys.
+It does work well but not all issues resolved.
+
 
 A basic Diagram
 ```
@@ -22,6 +35,6 @@ During the execution of `auto_recv` it will check `key.md5` provided in `../down
 Comparing the hashes and a mismatch will cause an error.
 
 - `crawler.py` - Scrapes tumblr
-- `auto_drop.sh` - Packages + decrypts
+- `auto_drop.sh` - Packages + encrypts
 - `auto_recv.sh` - Unpackages + decrypts
 - `process.py` - runs processing engine
