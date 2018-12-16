@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-__version__ = '1.6.13'
+__version__ = '1.7.13'
 __author__ = 'https://github.com/Skarlett'
 
 ##################
@@ -31,7 +31,10 @@ def download_media(pkg):
         fp = os.path.join(to, '{}.{}'.format(file_hash, file_extension))
 
         if not os.path.isdir(os.path.split(fp)[0]):
-          os.makedirs(os.path.split(fp)[0])
+          try:
+            os.makedirs(os.path.split(fp)[0])
+          except:
+            pass
 
         if not os.path.isfile(fp):
             try:
@@ -58,45 +61,41 @@ class Worker(threading.Thread):
     def __init__(self, parent, id, threads=CONFIG_FILE.DL_THREADS, chunksize=CONFIG_FILE.DL_SIZE):
       self.id = id
       self.closed = False
-      self.queue = parent.users
-      self.dir = parent.directory
-      self.remember = parent.remember
-      self.user_limit = parent.user_limit
+      self.parent = parent
       self.handles = threads
       self.chunksize = chunksize
-      self.done = False
+      self.done = parent.running
       threading.Thread.__init__(self, daemon=True)
 
     def run(self):
       ''' Agent - This handles on per user'''
       with multiprocessing.Pool(processes=self.handles) as pool:
         try:
-          while not self.done:
-              while not self.queue.empty():
-                user = self.queue.get(block=True)
-                self.remember.add(user)
+          while self.parent.running:
+              while not self.parent.users.empty():
+                user = self.parent.users.get(block=True)
+                self.parent.remember.add(user)
 
-                download_to = os.path.join(self.dir, user.name)
+                download_to = os.path.join(self.parent.directory, user.name)
                 print("gathering <{}>".format(user.name))
                 user.scrape()
 
                 for user in user.shoutouts:
-                  if not user in self.remember:
-                    self.queue.put(user)
+                  if not user in self.parent.remember:
+                    self.parent.users.put(user)
 
-                #try:
-                self.queue.task_done()
-                #except ValueError:
-                #  pass
+                self.parent.users.task_done()
 
                 if user.media and not user.ignore and len(user.media) >= user.minimum_media:
                   if not os.path.isdir(download_to):
-                    os.mkdir(download_to)
-
+                    try:
+                      os.mkdir(download_to)
+                    except:
+                        pass
                 print('[{}] Scraping {} <{}>'.format(self.id, user.name, len(user.media)))
                 pool.map(download_media, [(str(url), str(download_to), self.chunksize) for url in user.media])
 
-                if self.user_limit > 0 and len(self.remember) >= self.user_limit:
+                if self.parent.user_limit > 0 and len(self.parent.remember) >= self.parent.user_limit:
                   break
 
         except KeyboardInterrupt:
@@ -106,21 +105,31 @@ class Worker(threading.Thread):
       if not self.closed:
          pool.close()
 
-      self.done = True
       pool.join()
 
 class Manager:
   def __init__(self, user_limit=0, output=None, agents=CONFIG_FILE.DL_AGENTS, workers=CONFIG_FILE.DL_THREADS):
       self.user_limit = user_limit
-
       self.users = SetQueue()
-
       self.directory = output or os.getcwd()
       self.remember = set()
       self._download_agents = agents
       self._dl_workers = workers
       self._spawned = False
       self._agents = set()
+      self.running = True
+
+
+  def read_cache(self, db, **kwargs):
+      with open(os.path.join(self.directory, '.last_scrape.tscrape')) as f:
+        for line in f:
+          self.users.put_nowait(RestlessCrawler(self, line.strip(), db, **kwargs))
+
+  def write_cache(self):
+    fp = os.path.join(self.directory, '.last_scrape.tscrape')
+    with open(fp, 'w') as f:
+      while not self.users.empty():
+        f.write('{}\n'.format(self.users.get_nowait().name))
 
   def spawn_agents(self):
     if not self._spawned:
@@ -130,17 +139,27 @@ class Manager:
 
   def start(self, user, db, **kwargs):
     user = RestlessCrawler(self, user, db, **kwargs)
+
+    fp = os.path.join(self.directory, '.last_scrape.tscrape')
+    if os.path.isfile(fp):
+      self.read_cache(db, **kwargs)
+
     self.users.put_nowait(user)
     self.spawn_agents()
 
     for agent in self._agents:
       agent.start()
+    try:
+      while self.running:
+        if all(not(agent.is_alive()) for agent in self._agents):
+          break
+        # print(tuple(x.name for x in self.remember), self.users.qsize())
+        time.sleep(2)
+    except KeyboardInterrupt:
+        print("exitting...")
+        self.running = False
+    self.write_cache()
 
-    while True:
-      if all(agent.done for agent in self._agents):
-        break
-      # print(tuple(x.name for x in self.remember), self.users.qsize())
-      time.sleep(2)
 
 
 class CLI:
@@ -211,7 +230,7 @@ class CLI:
       --min-followers <int> | 0 =>
       --min-posts     <int> | 0 =>
       -il | --ignore-api-limitations | False
-      
+      --throttle | auto limits requests   
 
       The amount of agents is the amount of account that can simultaneously be downloaded at once
       --agents <int> | {agents}
@@ -255,7 +274,8 @@ class CLI:
 
         DB_FLAGS = (
             (('--keys',), 'list_keys'),
-            (('--ignore-api-limitations', '-il'), 'no_raise')
+            (('--ignore-api-limitations', '-il'), 'no_raise'),
+            (('--throttle',), 'throttle')
         )
 
         CRAWL_CMDS = (

@@ -5,10 +5,12 @@ import pytumblr as api
 import time
 import os
 import json
-
+import logging
 
 class RotatedTumblrRestClient(api.TumblrRestClient):
-    def __init__(self, db, keys):
+    _Throttle_Interval = 60
+
+    def __init__(self, db, keys, throttle=False):
         self.db = db
         self.dlimit = CONFIG_FILE.TLIMIT
         self.reset = CONFIG_FILE.RESET
@@ -17,8 +19,39 @@ class RotatedTumblrRestClient(api.TumblrRestClient):
 
         self.consumer_key = keys[0]
         self.save_counter = 0
+        self.throttle = throttle
+        self._throttle_cnt = 0
+        self._throttle_ts = 0
+        self._throttle_limit = CONFIG_FILE.HLIMIT/self._Throttle_Interval
+        self._dead = False
+        self._dead_ts = 0
 
         api.TumblrRestClient.__init__(self, *keys)
+
+    def __eq__(self, other):
+      try:
+        return self.consumer_key == other.consumer_key
+      except:
+        return False
+
+    def __hash__(self):
+      return hash(self.consumer_key)
+
+    def die(self):
+      if not self._dead:
+        logging.fatal("API exceeded limit")
+        self._dead = True
+        self._dead_ts = time.time()
+
+    def is_alive(self):
+      if not self._dead:
+        return True
+      else:
+        if time.time() >= self._dead_ts + 3600:
+          self._dead = False
+          return True
+
+      return False
 
     @property
     def dcnt(self):
@@ -37,7 +70,8 @@ class RotatedTumblrRestClient(api.TumblrRestClient):
         return self.db._data[self.consumer_key]['hts']
 
     def is_ready(self):
-        return self.hlimit > self.hcnt and self.dlimit > self.dcnt + self.hcnt
+        return self.is_alive() #self.hlimit > self.hcnt and self.dlimit > self.dcnt + self.hcnt # and \
+               # time.time() >= self._throttle_ts + self._Throttle_Interval
 
     def kill(self):
         self.db._data[self.consumer_key]['hcnt'] = self.hlimit
@@ -62,6 +96,17 @@ class RotatedTumblrRestClient(api.TumblrRestClient):
             self.save_counter += 1
 
         self.time_check()
+        if self.throttle:
+          if self._throttle_limit <= self._throttle_cnt:
+              self.db.rollover()
+          else:
+            if self._throttle_ts + self._Throttle_Interval <= time.time():
+              self._throttle_ts = time.time()
+              self._throttle_cnt = 0
+            else:
+              self.db.rollover()
+          self._throttle_cnt += 1
+
         if not self.dcnt + self.hcnt > self.dlimit or not self.db._raise:
             if not self.hcnt > self.hlimit or not self.db._raise:
                 # if DEBUGGING:
@@ -71,7 +116,14 @@ class RotatedTumblrRestClient(api.TumblrRestClient):
                     self, method, url,
                     params, valid_parameters, needs_api_key
                 )
-
+                if 'errors' in resp and 'meta' in resp:
+                    pprint(resp)
+                    logging.warning(resp['meta']['msg'])
+                    if resp['meta']['msg'].lower() == 'limit exceeded':
+                        self.db._data[self.db.current_client.consumer_key]['dcnt'] = self.db.current_client.dcnt - self.db.current_client.hcnt
+                        self.db._data[self.db.current_client.consumer_key]['hcnt'] = 0
+                        self.die()
+                        self.db.rollover()
                 if resp:
                     self.db._data[self.consumer_key]['hcnt'] += 1
                     return resp
@@ -94,10 +146,11 @@ class JSONAPIrotator:
     FP = CONFIG_FILE.DB
     Client_Klass = RotatedTumblrRestClient
 
-    def __init__(self, client_class=None):
+    def __init__(self, throttle=False, client_class=None):
         self.clients = set()
         self.client_cls = client_class or self.Client_Klass
         self._raise = True
+        self.current_client = None
 
         if not os.path.isfile(self.FP):
             with open(self.FP, 'w') as fd:
@@ -107,9 +160,19 @@ class JSONAPIrotator:
                 self._data = json.load(fd)
 
         for key in self._data.keys():
-          client = self.client_cls(self, self._data[key]['keys'])
+          client = self.client_cls(self, self._data[key]['keys'], throttle=throttle)
           self.clients.add(client)
 
+        self.rollover()
+
+    def rollover(self):
+        self.save()
+        for x in self.clients:
+            if x.is_ready() and self.current_client != x:
+              self.current_client = x
+              return
+
+        raise NoKeysInDatabase('No keys found in database to return')
 
     def save(self):
         for x in self.clients:
@@ -163,15 +226,3 @@ class JSONAPIrotator:
         Total Left per 24h: {}
         Total Left per 1h: {}
         '''.format(data, self.requests_left_today(), self.requests_left_inhour()), True
-
-    def feed_client(self):
-        self.save()
-
-        for x in self.clients:
-            if x.is_ready():
-                return x
-
-        if self._raise:
-            raise NoKeysInDatabase('No keys found in database to return')
-        else:
-            return list(self.clients)[0]

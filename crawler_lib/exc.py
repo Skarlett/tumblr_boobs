@@ -13,4 +13,8 @@ class HourLimitCap(TooManyRequestsWarning):
 class DayLimitCap(TooManyRequestsWarning):
     pass
 
-class NoMorePosts(Exception):pass
+class NoMorePosts(Exception):
+    pass
+
+class ForcedRollover(Exception):
+    pass

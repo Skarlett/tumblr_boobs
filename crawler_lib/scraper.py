@@ -25,7 +25,6 @@ class RestlessCrawler:
 
         self.mgr = mgr
         self.db = db
-        self.client = db.feed_client()
         self.name = user
         self.shoutouts = set()
         self.media = set()
@@ -55,19 +54,11 @@ class RestlessCrawler:
 
 
     def _rotate_posts(self, start_at=0, **kwargs):
-        jpkg = self.client.posts(self.name, offset=start_at, **kwargs)
-        if jpkg:
-           if 'errors' in jpkg and 'meta' in jpkg:
-             pprint(jpkg)
-             logging.warning(jpkg['meta']['msg'])
-             if jpkg['meta']['msg'].lower() == 'limit exceeded':
-               self.client.db._data[self.client.consumer_key]['dcnt'] = self.client.dcnt - self.client.hcnt
-               self.client.db._data[self.client.consumer_key]['hcnt'] = 0
-               self.client = self.db.feed_client()
-
+        jpkg = self.db.current_client.posts(self.name, offset=start_at, **kwargs)
+        if jpkg and 'blog' in jpkg:
            if self.adult or self.nsfw:
               for _filter in ['is_adult', 'is_nsfw']:
-                if not _filter in jpkg['blog'] and jpkg['blog'][_filter]:
+                if not _filter in jpkg['blog']:
                   break
 
            if 'posts' in jpkg and jpkg['posts']:
@@ -117,6 +108,7 @@ class RestlessCrawler:
 
         if post['type'] == 'photo':
           self.media.update(pic['original_size']['url'] for pic in post['photos'])
+
 
     def scrape(self, **kwargs):
         for deprecated in ('type', 'tag', 'offset'):
